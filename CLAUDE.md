@@ -1,0 +1,46 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Overview
+
+Single-script project (`actualizar_eventos_fen_final.py`, ~1900 lines, Python 3.12, Windows) that scrapes official Peruvian sources (INDECI, COEN-INDECI, Contraloría, ENFEN) and maintains an Excel workbook of hydrometeorological events related to El Niño. `README_FEN_AUTOMATIZACION.md` (in Spanish) is the detailed design/rules document; it still refers to the script as `actualizar_eventos_fen_v16.py` — that is this file. Read it before changing classification, territorial inference, or Excel-writing logic.
+
+There is no git repo, test suite, linter, or build step. Dependencies: `pip install -r requirements.txt`.
+
+## Commands
+
+```powershell
+python actualizar_eventos_fen_final.py --dry-run                      # weekly, no save (default lookback 14d, 4 threads)
+python actualizar_eventos_fen_final.py                                # weekly, updates the official workbook
+python actualizar_eventos_fen_final.py --backfill-year 2026 --dry-run --threads 8
+python actualizar_eventos_fen_final.py --from-date 2023-01-01 --to-date 2026-10-05 --output "out.xlsx"
+python -m py_compile actualizar_eventos_fen_final.py                  # minimum check before delivering
+```
+
+`--max-new` defaults to 100 in weekly and to no cap in backfill. Always `--dry-run` first. Backfill writes to a separate workbook saved in the script's folder (the workspace; relative `--output` paths resolve there too) and must never modify the official one. Logs and `resumen_fen_*.json` go to `logs/` next to the script. Exit codes: 0 OK, 1 scraping error, 2 workbook missing, 3 invalid structure/backfill prep, 4 save failure. `DEFAULT_WORKBOOK` (line ~45) is `data/Eventos Fenomeno del Niño (2).xlsx` (input, next to the script); override with `--workbook`. If it doesn't exist, `create_empty_workbook` creates it at that path with the three sheets and headers (empty `Distritos Zonas` master ⇒ locations/zones come out blank until it's filled).
+
+The README's §27 checklist (and its two regression cases: COEN "Yauyos" must not yield Chorrillos; "San Marcos - Ancash" must not yield Santa Cruz/Ica) is the acceptance test; there are no automated tests, so verify these manually via `--dry-run`.
+
+## Architecture (pipeline)
+
+1. **Discovery**: `SOURCES` config → `discover_links` (weekly). Backfill: INDECI/Contraloría/COEN use `find_backfill_last_page` (bisection on index-page dates; COEN needs ~500 pages for a year, `--backfill-max-pages` is only a safety cap; the COEN index is ordered by last *update*, not report date, so a page is out of range only when its NEWEST URL date is before the start, plus a 5-page margin) + `discover_numbered_index_links` (parallel); ENFEN uses `discover_links_with_pagination` (cap 60). COEN/ENFEN URLs carry the report date, so out-of-range URLs are dropped before downloading; COEN slugs also carry the emergency type, so `coen_url_worth_fetching` skips (never downloads) incendios, sismos, heladas, boletines/avisos and "reporte de peligro inminente" (no occurred event) — only ~20 % of the COEN index is fetched.
+2. **Fetch/parse in threads**: `ThreadPoolExecutor` runs `extract_article_threaded` → `Article` dataclass (per-thread `requests.Session` via thread-local). Threads do I/O and parsing only.
+3. **Classification** (main thread): regex lists `DIRECT_FEN_PATTERNS`, `HAZARD_PATTERNS`, `EVENT_OCCURRED_PATTERNS`, `NON_EVENT_PATTERNS` → `Eventos_reales` vs `Eventos_candidatos` vs log-only. The FEN link is an evidence level (`assess_fen_evidence`, column `Nivel_evidencia_FEN`, auto-added to both sheets by `ensure_column`): 1 explicit cause, 2 FEN declaratoria (DS …-PCM) whose parsed validity window covers the event date, 3 event inside the current ENFEN alert (`detect_enfen_alert_start`, from ENFEN comunicado URLs), 4 none. Level 2 is also granted per district from the official decree annexes (`data/decretos/decretos_fen.json`, built with `--build-decretos` from the PDFs in `data/decretos/`; districts matched against the INEI catalog, ~95 % of each annex, with dates in `DECREE_SOURCES`): a district listed in the annex whose event date falls inside the 60-day window is level 2 even if the COEN report does not quote the decree, so one publication can yield real rows for some districts and candidates for others. Real = level 1–2 + hazard + occurred; a decree note that does not cover the event date (or has no parseable dates) does NOT make it real. Candidates = hazard + occurred + level 3–4 + `candidate_event_context_ok`.
+4. **COEN special path**: hydromet-type check → find the PDF whose name has the *same report number* **or the same event signature** (type + place; complementary reports link to the latest update's PDF, which has a different number) via `find_coen_pdf_url`/`coen_event_signature` → `pypdf` text (no OCR) → `infer_coen_locations` using title, `1. HECHOS`, `2. UBICACION` sections after `clean_coen_pdf_location_text`. Non-COEN sources use generic `infer_locations`: explicit `distrito de X`, exact list items after `distritos de`, or `X (Departamento)`; homonyms need their department mentioned and names equal to a department need an explicit `distrito de`. A bare name anywhere in the text is never evidence. For COEN the emergency TYPE in the title gates hazard detection (`coen_is_hydromet_report`): incendios/sismos never become candidates even if the text mentions a toponym like "Huayco Pampa". `/page/N/` URLs are indexes, never articles. `extract_coen_title` must never fall back to the first heading of the page (carousel of latest reports); only reports/informes with a number in the URL get a PDF search, boletines/avisos/sísmicos do not. For COEN pages the report body is `div.post-content`; the first `<article>` on portal.indeci.gob.pe is a carousel of the *latest* reports from other events and must not be used as page text.
+5. **Excel**: territory/zone come from the `Distritos Zonas` master sheet, completed with the INEI catalog `data/ubigeo_distrito.csv` (`--ubigeo`; `merge_ubigeo_into_catalog`: adds districts missing from the master with their department's zone, and gives province + 6-digit `Ubigeo` when unique — ambiguous same-name districts in one department get them from the PDF table) via `load_location_catalog`; new auto-created columns `Nivel_evidencia_FEN` and `Ubigeo` (text) in both sheets; one row per event × district; dedupe by URL and by `row_key` (title+effective date+dept+district); rows are written with `next_data_row` and the sheet's Excel Table range is kept in sync by `set_tables_last_row` (never use `ws.max_row`/`ws.append`: formatted blank rows push data outside the table); `save_workbook_safely` writes temp file then `os.replace` with retries (OneDrive locks).
+
+gob.pe (INDECI, Contraloría) throttles bursts by returning HTTP 200 with a ~7.9 KB near-empty page; `request_html` limits concurrency (`GOB_PE_SEMAPHORE`) and retries pages under `GOB_PE_MIN_ARTICLE_BYTES`. Without this, 56–76 % of articles came out "sin fecha" and were silently lost. If `omitidos_sin_fecha` is large for a gob.pe source, suspect throttling before suspecting the parser. `EVENT_OCCURRED_PATTERNS` must cover past-tense/participle forms (ocasionaron, ocurridas, fallecio, se han reportado, danos…): a missing form drops the whole article, not a field.
+
+## Hard rules (from the README; violating them has caused real bugs)
+
+- Precision over recall: leave location empty rather than guess. Exception (by design): a COEN title that explicitly says `distrito de X - DEPARTAMENTO` fills distrito+departamento even if X is not in the master (`coen_title_location`); its Zona comes from the department (`department_zone`).
+- Never write to openpyxl from worker threads.
+- Never treat any district name found in a PDF as the affected district; ignore COEN's institutional address; don't promote `centro poblado`/`sector`/`provincia` to distrito; always constrain homonyms by departamento.
+- Never infer Zona (Niño/Alerta/Control) from news text — only from the master sheet. Per the workbook's `Metodologia_y_fuentes` sheet, zones are a department-level proxy (every district of a department shares the label), so a district missing from the master takes its department's zone.
+- `Escala_Magnitud` follows `Metodologia_y_fuentes` (Alta = people affected and/or 3+ damage types; Media = relevant material damage; Baja = localized/no quantified damage) and is computed from the COEN damage table (`infer_magnitude`), not from generic keywords like "emergencia". Event name is the short type (`infer_event_name`); place goes in its own columns; Provincia comes from the PDF tables (`coen_province_for`).
+- Fix territorial false positives methodologically (section/role/department evidence), not with name blacklists.
+- Event date: `article.event_date` (occurrence) takes priority over `published`.
+- Don't retry 404/410; don't download all PDFs on a COEN page; don't reintroduce the Tambogrande source without redesigning its pagination.
+- Weekly mode must not touch the XLSX when nothing new was added.
+- `verify=False` on HTTP requests is a deliberate concession to the corporate SSL proxy.

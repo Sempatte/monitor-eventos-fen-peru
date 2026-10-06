@@ -1,0 +1,17 @@
+# Resultados y trazas generadas por el script
+logs/
+*_backfill_*.xlsx
+_prueba*.xlsx
+
+# Archivos temporales de Excel / OneDrive
+~$*
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Datos que no se publican: libro de trabajo y PDF oficiales (se regeneran o se descargan)
+data/*.xlsx
+data/decretos/*.pdf
