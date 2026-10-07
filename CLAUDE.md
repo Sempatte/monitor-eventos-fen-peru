@@ -11,7 +11,7 @@ There is no git repo, test suite, linter, or build step. Dependencies: `pip inst
 ## Commands
 
 ```powershell
-python actualizar_eventos_fen_final.py --dry-run                      # weekly, no save (default lookback 14d, 4 threads)
+python actualizar_eventos_fen_final.py --dry-run                      # weekly, no save (default lookback 7d, 4 threads)
 python actualizar_eventos_fen_final.py                                # weekly, updates the official workbook
 python actualizar_eventos_fen_final.py --backfill-year 2026 --dry-run --threads 8
 python actualizar_eventos_fen_final.py --from-date 2023-01-01 --to-date 2026-10-05 --output "out.xlsx"
@@ -42,5 +42,5 @@ gob.pe (INDECI, Contraloría) throttles bursts by returning HTTP 200 with a ~7.9
 - Fix territorial false positives methodologically (section/role/department evidence), not with name blacklists.
 - Event date: `article.event_date` (occurrence) takes priority over `published`.
 - Don't retry 404/410; don't download all PDFs on a COEN page; don't reintroduce the Tambogrande source without redesigning its pagination.
-- Weekly mode must not touch the XLSX when nothing new was added.
+- Weekly (non-dry-run) mode appends one row per run to the `Historial_ejecuciones` sheet (`append_history_row`) and therefore always saves the XLSX, even with no new events. Backfill never touches the official workbook and skips saving when empty. Runs that fail before the final save (exit 1-4) leave no row: check the Task Scheduler result and `logs/`.
 - `verify=False` on HTTP requests is a deliberate concession to the corporate SSL proxy.

@@ -172,7 +172,7 @@ python actualizar_eventos_fen_v16.py
 Default:
 
 ```text
-lookback = 14 dias
+lookback = 7 dias
 threads = 4
 ```
 

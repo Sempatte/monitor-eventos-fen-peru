@@ -1949,6 +1949,83 @@ def ensure_candidates_sheet(wb):
     return ws
 
 
+HISTORY_SHEET = "Historial_ejecuciones"
+HISTORY_HEADERS = [
+    ("Fecha_hora", 18),
+    ("Modo", 10),
+    ("Resultado", 18),
+    ("Eventos_reales_agregados", 14),
+    ("Eventos_candidatos_agregados", 14),
+    ("Enlaces_nuevos", 12),
+    ("Duplicados", 11),
+    ("Omitidos_sin_fecha", 13),
+    ("Articulos_no_recuperados", 14),
+    ("Tiempo_s", 10),
+    ("Alertas", 60),
+    ("Log", 60),
+]
+
+
+def ensure_history_sheet(wb):
+    if HISTORY_SHEET in wb.sheetnames:
+        return wb[HISTORY_SHEET]
+
+    ws = wb.create_sheet(HISTORY_SHEET)
+    for col, (header, width) in enumerate(HISTORY_HEADERS, 1):
+        cell = ws.cell(1, col, header)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="375623")
+        ws.column_dimensions[cell.column_letter].width = width
+    ws.freeze_panes = "A2"
+    return ws
+
+
+def append_history_row(wb, payload: dict) -> None:
+    """Registra una fila por ejecucion (hilo principal; la hoja no tiene Tabla de Excel)."""
+    ws = ensure_history_sheet(wb)
+    reales = payload.get("eventos_reales_agregados", 0)
+    candidatos = payload.get("eventos_candidatos_agregados", 0)
+    throttle = payload.get("gobpe_limitacion") or {}
+
+    alerts = []
+    if payload.get("omitidos_limite"):
+        alerts.append(f"{payload['omitidos_limite']} filas omitidas por --max-new")
+    if throttle.get("no_recuperadas") or throttle.get("indices_vacios"):
+        alerts.append(
+            f"gob.pe limito consultas ({throttle.get('no_recuperadas', 0)} noticias no recuperadas, "
+            f"{throttle.get('indices_vacios', 0)} indices vacios)"
+        )
+    if payload.get("articulos_no_recuperados"):
+        alerts.append(f"{payload['articulos_no_recuperados']} articulos no recuperados")
+
+    if alerts:
+        result = "OK con alertas"
+    elif reales == 0 and candidatos == 0:
+        result = "OK sin novedades"
+    else:
+        result = "OK"
+
+    values = [
+        datetime.fromisoformat(payload["timestamp"]),
+        payload.get("mode"),
+        result,
+        reales,
+        candidatos,
+        payload.get("enlaces_no_vistos", 0),
+        payload.get("duplicados", 0),
+        payload.get("omitidos_sin_fecha", 0),
+        payload.get("articulos_no_recuperados", 0),
+        payload.get("tiempo_total_segundos"),
+        "; ".join(alerts),
+        payload.get("log"),
+    ]
+    row = next_data_row(ws)
+    for col, value in enumerate(values, 1):
+        cell = ws.cell(row, col, value)
+        if col == 1:
+            cell.number_format = "yyyy-mm-dd hh:mm"
+
+
 def existing_state(events_ws, candidates_ws) -> tuple[set[str], set[str]]:
     urls: set[str] = set()
     keys: set[str] = set()
@@ -2847,6 +2924,10 @@ def prepare_backfill_workbook(input_path: Path, output_path: Path) -> None:
     if "Eventos_candidatos" in wb.sheetnames:
         clear_sheet_data_preserve_format(wb["Eventos_candidatos"])
 
+    # El historial de ejecuciones semanales del Excel oficial no aplica al backfill.
+    if HISTORY_SHEET in wb.sheetnames:
+        clear_sheet_data_preserve_format(wb[HISTORY_SHEET])
+
     wb.save(output_path)
     logging.info("Workbook historico preparado (tablas vacias): %s", output_path)
 
@@ -2875,8 +2956,8 @@ def main() -> int:
     parser.add_argument(
         "--lookback-days",
         type=int,
-        default=14,
-        help="Solo considera publicaciones de los ultimos N dias en modo weekly. Default: 14.",
+        default=7,
+        help="Solo considera publicaciones de los ultimos N dias en modo weekly. Default: 7.",
     )
     parser.add_argument(
         "--from-date",
@@ -3467,9 +3548,12 @@ def main() -> int:
             )
         return 0
 
-    # Si no hubo novedades, no tocamos el archivo; evita generar versiones inutiles
-    # en SharePoint/OneDrive.
-    if inserted == 0 and candidates == 0:
+    # Weekly: cada ejecucion deja una fila en Historial_ejecuciones, asi que siempre se guarda.
+    # Backfill (libro independiente): sin novedades no se guarda nada.
+    if not backfill:
+        append_history_row(wb, summary_payload)
+
+    if backfill and inserted == 0 and candidates == 0:
         logging.info("Sin novedades. El Excel no fue modificado.")
         if summary_path:
             logging.info("Resumen PAD JSON: %s", summary_path)
@@ -3500,7 +3584,8 @@ def main() -> int:
         return 4
 
     logging.info("Excel actualizado correctamente: %s", workbook_path)
-    logging.info("OneDrive sincronizara el cambio con SharePoint.")
+    if inserted == 0 and candidates == 0:
+        logging.info("Sin novedades; solo se registro la ejecucion en %s.", HISTORY_SHEET)
     if summary_path:
         logging.info("Resumen PAD JSON: %s", summary_path)
     logging.info("Log: %s", log_path)
@@ -3509,28 +3594,32 @@ def main() -> int:
     if not args.no_popup:
         mostrar_resultado(
             "Actualizacion FEN - Exito",
-            resumen_exito(summary_payload, log_path),
+            resumen_exito(summary_payload, log_path, sin_novedades=(inserted == 0 and candidates == 0)),
         )
     return 0
 
 
 if __name__ == "__main__":
+    # args no existe fuera de main(): con --no-popup (tarea programada) un MessageBox colgaria el proceso.
+    quiet = "--no-popup" in sys.argv
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
         if sys.stderr is not None:
             print("Proceso cancelado por el usuario.", file=sys.stderr)
-        mostrar_resultado(
-            "Actualizacion FEN - Cancelada",
-            "El proceso fue cancelado por el usuario.",
-            es_error=True,
-        )
+        if not quiet:
+            mostrar_resultado(
+                "Actualizacion FEN - Cancelada",
+                "El proceso fue cancelado por el usuario.",
+                es_error=True,
+            )
         raise SystemExit(1)
     except Exception as exc:
         logging.exception("Error general no controlado: %s", exc)
-        mostrar_resultado(
-            "Actualizacion FEN - Error",
-            f"Ocurrio un error general no controlado.\n\nDetalle: {exc}",
-            es_error=True,
-        )
+        if not quiet:
+            mostrar_resultado(
+                "Actualizacion FEN - Error",
+                f"Ocurrio un error general no controlado.\n\nDetalle: {exc}",
+                es_error=True,
+            )
         raise SystemExit(1)

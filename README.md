@@ -19,6 +19,7 @@ Monitor automatizado de eventos hidrometeorológicos en Perú (lluvias intensas,
 
 - **Dos hojas de resultado:** `Eventos_reales` (niveles 1 y 2) y `Eventos_candidatos` (ocurrieron, pero sin vínculo verificado). Las publicaciones informativas, preventivas o de pronóstico solo se registran en el log.
 - **Severidad** (`Escala_Magnitud`: Alta / Media / Baja) según los daños de la tabla del reporte, con los criterios de la hoja `Metodologia_y_fuentes`.
+- **Historial:** cada ejecución semanal (sin `--dry-run`) añade una fila a la hoja `Historial_ejecuciones` (fecha, filas nuevas, duplicados, alertas de límite o de gob.pe, log), incluso si no hubo novedades. Las ejecuciones que fallan antes de guardar no dejan fila; para eso están `logs/` y el código de salida.
 - **Modos:** semanal incremental (actualiza el Excel oficial) y *backfill* histórico sobre un rango de fechas (genera un Excel independiente, sin tocar el oficial).
 
 ## Instalación
@@ -32,7 +33,7 @@ pip install -r requirements.txt
 ## Uso
 
 ```bash
-# Semanal (últimos 14 días). Siempre probar primero con --dry-run
+# Semanal (últimos 7 días). Siempre probar primero con --dry-run
 python actualizar_eventos_fen_final.py --dry-run
 python actualizar_eventos_fen_final.py
 
