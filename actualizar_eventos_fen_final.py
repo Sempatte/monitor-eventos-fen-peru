@@ -46,7 +46,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # CONFIGURACION
 # -----------------------------------------------------------------------------
 
-DEFAULT_WORKBOOK = Path(__file__).resolve().parent / "data" / "Eventos Fenomeno del Niño (2).xlsx"
+DEFAULT_WORKBOOK = Path(__file__).resolve().parent / "data" / "Eventos Fenomeno del Niño.xlsx"
 
 # Los logs NO se guardan junto al Excel de SharePoint.
 DEFAULT_LOG_DIR = Path(__file__).resolve().parent / "logs"
